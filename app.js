@@ -8,6 +8,8 @@ const ejs = require("ejs");
 const session = require('express-session');
 const passport = require("passport");
 const passportLocalMongoose = require("passport-local-mongoose");
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const findOrCreate = require('mongoose-findorcreate');
 
 const app = express();
 
@@ -28,21 +30,61 @@ mongoose.connect("mongodb://127.0.0.1:27017", { useNewUrlParser: true, dbName: "
 
 const userSchema = new mongoose.Schema({
     email: String,
-    password: String
+    password: String,
+    googleId: String,
+    secret: String
 });
 
 userSchema.plugin(passportLocalMongoose);
+userSchema.plugin(findOrCreate);
 
 const User = new mongoose.model("User", userSchema);
 
 passport.use(User.createStrategy());
 
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
+passport.serializeUser(function(user, cb) {
+    process.nextTick(function() {
+      cb(null, { id: user.id, username: user.username });
+    });
+  });
+  
+  passport.deserializeUser(function(user, cb) {
+    process.nextTick(function() {
+      return cb(null, user);
+    });
+  });
+
+passport.use(new GoogleStrategy({
+    clientID: process.env.CLIENT_ID,
+    clientSecret: process.env.CLIENT_SECRET,
+    callbackURL: "http://localhost:3000/auth/google/secrets",
+    userProfileURL: "https://www.googleapis.com/oauth2/v3/userinfo" // This is a fix for a bug in the GoogleStrategy
+  },
+  function(accessToken, refreshToken, profile, cb) {
+    console.log(profile);
+    User.findOrCreate({ googleId: profile.id }, function (err, user) {
+      return cb(err, user);
+    });
+  }
+));
 
 app.get("/", function(req, res) {
     res.render("home");
 });
+
+app.get("/auth/google", passport.authenticate('google', 
+    {
+        scope: ["profile"]
+    })
+)
+
+app.get("/auth/google/secrets", passport.authenticate('google', {
+        failureRedirect: "/login"
+    }),
+    function(req, res) {
+        // Successful Authentication
+        res.redirect("/secrets");
+})
 
 app.get("/login", function(req, res) {
     res.render("login");
@@ -53,8 +95,20 @@ app.get("/register", function(req, res) {
 })
 
 app.get("/secrets", function(req, res) {
+    User.find({"secret": {$ne: null}})
+        .then((foundUsers) => {
+            console.log("Users found ----- get secrets");
+            if (foundUsers) {
+                console.log(foundUsers);
+                res.render("secrets", {usersWithSecrets: foundUsers});
+              }
+        })
+        .catch((err) => console.log(err));
+});
+
+app.get("/submit", function(req, res) {
     if (req.isAuthenticated()) {
-        res.render("secrets");
+        res.render("submit");
     } else {
         res.redirect("/login");
     }
@@ -95,11 +149,29 @@ app.post("/login", function(req, res) {
             res.redirect("/login");
         } else {
             passport.authenticate("local")(req, res, function() {
-                res.render("secrets");
+                res.redirect("/secrets");
             })
         }
     })
 });
+
+app.post("/submit", function(req, res) {
+    const submittedSecret = req.body.secret;
+
+    console.log(req.user);
+
+    User.findById(req.user.id)
+        .then((foundUser) => {
+            if (foundUser) {
+                console.log("User has been found ----- post submit");
+                foundUser.secret = submittedSecret;
+                foundUser.save()
+                    .then(() => res.redirect("/secrets"))
+            }
+        })
+        .catch((err) => console.log(err));
+    
+})
 
 
 app.listen(3000, function(){
